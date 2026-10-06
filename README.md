@@ -33,25 +33,73 @@ Columns:
 - **`X_test.csv`**: `Id`, `t`, and the initial positions `x0_i`, `y0_i` of the three bodies (positions at `t = 0`).
 - **`sample_submission.csv`**: `Id`, `x_i`, `y_i` for `i` in 1..3.
 
-The training set contains 5,000 trajectories of 257 consecutive rows each (`t = 0` to `t = 10`). Some trajectories are invalid and are removed during cleaning:
-trajectories made only of zeros, and the zeros that follow a collision between bodies.
+The training set contains 1,285,000 rows: 5,000 trajectories of 257 consecutive rows each (`t = 0` to `t = 10`, so one row is 10/257 s).
+Two trajectories are made only of zeros and some others contain a collision between bodies, after which the values are zero.
+Cleaning removes the all-zero trajectories and truncates the others at the first collision (4,998 trajectories and 1,089,790 rows remain).
+It also checks that there are no missing values, no infinite values and no empty columns.
 
 ## Approach
 
 All the models predict the positions at time `t` from `t` and the **initial positions only** (the velocities are not available at test time).
-Whole trajectories are split into train (60%), validation (20%) and test (20%) sets, so that no trajectory is shared between sets.
+Whole trajectories are split at random into train (60%), validation (20%) and test (20%) sets, so that no trajectory is shared between sets.
+No cross-validation is used for this split: the dataset is large enough, and it would take too much time.
 
-| Notebook | Content | Reported RMSE (local split) |
-|----------|---------|-----------------------------|
-| [task1.ipynb](src/task1.ipynb) | Linear regression baseline | 1.42 (test) |
-| [task2.ipynb](src/task2.ipynb) | Polynomial regression (degree 2) with L2 (ridge) regularization chosen by cross-validation | 1.42 (test) |
-| [task3.ipynb](src/task3.ipynb) | Polynomial regression with physics-inspired features and a search over feature groups | 1.18 (local test split, feature groups 0 + 1 + 3) |
-| [task4.ipynb](src/task4.ipynb) | K-nearest neighbors regression, with and without physics-inspired features | 0.89 (validation, best group combination) |
+| Notebook | Model |
+|----------|-------|
+| [task1.ipynb](src/task1.ipynb) | Linear regression baseline (standardized inputs) |
+| [task2.ipynb](src/task2.ipynb) | Polynomial regression with L2 (ridge) regularization, degree and regularization strength chosen on the validation set |
+| [task3.ipynb](src/task3.ipynb) | Variable removal, then polynomial regression with physics-inspired features and a search over feature groups |
+| [task4.ipynb](src/task4.ipynb) | K-nearest neighbors regression, with and without physics-inspired features |
 
-The physics-inspired features (see `add_three_body_features` in [src/utils.py](src/utils.py)) are: pairwise distances and their inverses, distance ratios,
-area and internal angles of the triangle formed by the bodies, distances to the center of mass, and an approximate angular momentum.
+The physics-inspired features (see `add_three_body_features` in [src/utils.py](src/utils.py)) are grouped as follows:
 
-The RMSE values above are the ones saved in the notebook outputs and come from the local train/validation/test split, not from the Kaggle leaderboard.
+| Group | Features |
+|-------|----------|
+| 0 (always included) | `t`, `x_1`, `y_1`, `x_2`, `y_2` |
+| 1 | pairwise distances `r_12`, `r_13`, `r_23` |
+| 2 | inverse distances `inv_r_12`, `inv_r_13`, `inv_r_23` |
+| 3 | distance ratios `r12_over_r13`, `r12_over_r23`, `r13_over_r23` |
+| 4 | area of the triangle formed by the three bodies |
+| 5 | distances to the center of mass `d1_cm`, `d2_cm`, `d3_cm` |
+
+The function also computes the internal angles of the triangle and an approximate angular momentum. All the combinations of groups are tested and compared by RMSE.
+
+## Results
+
+Average RMSE on the local test set, over several random splits:
+
+| Model | Average RMSE |
+|-------|--------------|
+| Linear regression (baseline) | 1.41 (1.43 on Kaggle) |
+| Polynomial regression, degree 2 with regularization | 1.33 |
+| Polynomial regression without `x_3`, `y_3` | 1.30 |
+| Polynomial regression with selected features (groups 0 + 1 + 3) | 1.18 |
+| k-NN with selected features (groups 0 + 3) | **0.89** |
+
+On the Kaggle private leaderboard, the final score is **0.94558** (rank 10). The RMSE values obtained locally are close to the Kaggle ones, so the local validation is consistent.
+The values saved in the notebook outputs come from single runs, so they can differ slightly from these averages.
+
+Main findings:
+
+- **Linear baseline:** the linear model gets an RMSE of about 1.41 and leaves a lot of the dynamics unexplained.
+- **Polynomial degree:** the number of polynomial features grows quickly with the degree (35 features at degree 2, 791 at degree 5, more than 170,000 at degree 15 for 7 inputs), which makes high degrees slow and prone to overfitting.
+  Over 15 runs on small subsets of 50 trajectories, the best degree was 1 without regularization (RMSE 1.20) and 2 with regularization (RMSE 1.14). Ridge and Lasso gave similar results, and Ridge was kept because it is much faster.
+- **Removing variables:** `x_3` and `y_3` are strongly correlated with the other coordinates. Removing them does not change the RMSE significantly (1.32 to 1.30), so they are dropped to reduce redundancy.
+- **Adding variables:** adding features improves the RMSE over the baseline. Groups 1 and 3 are always among the best combinations. With degree 2, only combinations of up to 3 groups could be tested (too many features otherwise):
+
+  | Groups | RMSE |
+  |--------|------|
+  | (0, 1, 2) | 1.1857 |
+  | (0, 2, 5) | 1.1900 |
+  | (0, 1, 3) | 1.1907 |
+  | (0, 1, 5) | 1.1911 |
+  | (0) only | 1.2934 |
+
+  Groups 0 + 1 + 3 were kept: their RMSE is almost the same as the two best ones, and they improve the polynomial model by about 0.1.
+- **k-NN:** the RMSE decreases steadily with `k` and the best value tested is `k = 14`, with no visible overfitting, probably because the dataset is large. Training time is almost constant (k-NN only stores the training points), while inference time grows with `k`.
+  The best feature groups for k-NN are different from the polynomial models: 0 + 3, and 0 + 3 + 5.
+
+What was difficult: long training times for high polynomial degrees, some instability of the k-NN results between runs, and understanding the structure of the data (one trajectory is 257 rows).
 
 ## Repository structure
 
